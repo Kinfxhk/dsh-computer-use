@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "電腦操作",
+    "description": "左側欄加一個電腦頁。你開啟之後，Agent 先可以透過 CUA driver 觀察同操作視窗。"
+  }
+}

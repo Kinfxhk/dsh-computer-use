@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Computer Use",
+    "description": "Adds a Computer sidebar page and lets an armed agent observe and operate windows through CUA driver."
+  }
+}

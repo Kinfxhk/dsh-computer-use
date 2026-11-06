@@ -35,6 +35,9 @@ const WRITE_ACTIONS = new Set(['click', 'type', 'key', 'scroll'])
 export const name = NS
 export const inject = ['webServer', 'tools']
 
+/** Exposed for the plugin's own tests; not part of the public surface. */
+export const __internal = { plain, sessionEnded }
+
 /**
  * @param {unknown} value
  * @param {number} max
@@ -49,6 +52,38 @@ function clean(value, max) {
 function reason(error) {
   if (error && typeof error === 'object' && typeof error.message === 'string' && error.message) return error.message
   return 'the operation failed'
+}
+
+/**
+ * Drop values that are not lossless JSON: DSH rejects a tool result holding
+ * `undefined` (a 4xx "value is not lossless JSON" for the whole call), so every
+ * result crossing the tool boundary goes through here first.
+ *
+ * @param {unknown} value
+ * @returns {unknown}
+ */
+function plain(value) {
+  if (Array.isArray(value)) return value.map(plain)
+  if (value && typeof value === 'object') {
+    /** @type {Record<string, unknown>} */
+    const out = {}
+    for (const [key, entry] of Object.entries(value)) {
+      if (entry === undefined || typeof entry === 'function') continue
+      out[key] = plain(entry)
+    }
+    return out
+  }
+  return value
+}
+
+/**
+ * The driver ends a named session on its own (idle timeout, driver restart)
+ * and then rejects ordinary calls with a message that names the recovery tool.
+ *
+ * @param {string} message
+ */
+function sessionEnded(message) {
+  return /session\b[^\n]*\bhas ended|call start_session/i.test(message)
 }
 
 /**
@@ -155,6 +190,7 @@ function createRuntime() {
   let provider = ''
   let providerError = ''
   let lastError = ''
+  let reachable = false
   let starting
   /** @type {{ at: number, action: string, detail: string, ok: boolean }[]} */
   const log = []
@@ -168,10 +204,10 @@ function createRuntime() {
   }
 
   function status() {
-    return {
+    return plain({
       ok: true,
       armed,
-      daemon: Boolean(child && child.exitCode == null && !child.killed),
+      daemon: reachable || Boolean(child && child.exitCode == null && !child.killed),
       driver: resolveDriver(),
       driverFound: Boolean(resolveDriver()),
       pipe: PIPE,
@@ -180,7 +216,7 @@ function createRuntime() {
       providerError: providerError || undefined,
       lastError: lastError || undefined,
       log,
-    }
+    })
   }
 
   /**
@@ -188,7 +224,7 @@ function createRuntime() {
    * @param {Record<string, unknown>} args
    * @param {number} timeoutMs
    */
-  function call(tool, args, timeoutMs = 20_000) {
+  function invoke(tool, args, timeoutMs = 20_000) {
     const exe = resolveDriver()
     if (!exe) return Promise.reject(new Error('cua-driver was not found'))
     return new Promise((resolve, reject) => {
@@ -231,6 +267,47 @@ function createRuntime() {
         }
       })
     })
+  }
+
+  /** @type {Promise<unknown> | undefined} */
+  let reviving
+
+  /**
+   * Revive the public session name. The driver never revives an ended name on
+   * an ordinary call; `start_session` is idempotent and the only way back.
+   */
+  function revive() {
+    if (!reviving) {
+      reviving = invoke('start_session', { session: SESSION }, 8_000)
+        .then(() => {
+          lastError = ''
+          note('recover', 'session revived', true)
+        })
+        .finally(() => {
+          reviving = undefined
+        })
+    }
+    return reviving
+  }
+
+  /**
+   * @param {string} tool
+   * @param {Record<string, unknown>} args
+   * @param {number} timeoutMs
+   */
+  async function call(tool, args, timeoutMs = 20_000) {
+    try {
+      const result = await invoke(tool, args, timeoutMs)
+      reachable = true
+      return result
+    } catch (error) {
+      const message = reason(error)
+      if (tool === 'start_session' || !sessionEnded(message)) throw error
+      await revive()
+      const result = await invoke(tool, args, timeoutMs)
+      reachable = true
+      return result
+    }
   }
 
   async function ensureDaemon() {
@@ -279,6 +356,7 @@ function createRuntime() {
   function stopDaemon() {
     const current = child
     child = undefined
+    reachable = false
     if (current && current.exitCode == null) current.kill()
   }
 
@@ -329,7 +407,18 @@ function createRuntime() {
    */
   async function run(request, source) {
     const action = clean(request.action, 24)
-    if (action === 'status') return status()
+    if (action === 'status') {
+      // Probe the pipe so `daemon` means "the driver answers", not "this
+      // process happens to own the child". An already-running driver that the
+      // plugin attached to (autostart, another launch) was reported as stopped.
+      try {
+        await call('get_screen_size', {}, 2_000)
+        reachable = true
+      } catch {
+        reachable = false
+      }
+      return status()
+    }
     if (action === 'arm') {
       if (!source.user) return { ok: false, error: 'only the Computer page can arm computer use' }
       armed = request.armed === true
@@ -416,8 +505,13 @@ function createRuntime() {
         return { ok: false, error: 'click needs elementToken, or x and y from the latest observe screenshot' }
       }
       if (!token) {
-        args.x = Number(request.x)
-        args.y = Number(request.y)
+        const x = Number(request.x)
+        const y = Number(request.y)
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+          return { ok: false, error: 'x and y must be finite screenshot-pixel numbers from the latest observe' }
+        }
+        args.x = x
+        args.y = y
       }
       if (request.button === 'right' || request.button === 'middle') args.button = request.button
       const raw = await call('click', args)
@@ -491,7 +585,7 @@ export function apply(ctx) {
       const method = req.method ?? 'GET'
       try {
         if (method === 'GET' && route === '/api/state') {
-          sendJson(res, 200, runtime.status())
+          sendJson(res, 200, await runtime.run({ action: 'status' }, { user: true }))
           return
         }
         if (method === 'GET' && route === '/api/preview') {
@@ -557,7 +651,7 @@ export function apply(ctx) {
         render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
       },
       async execute(args) {
-        return runtime.run(args && typeof args === 'object' ? args : {}, { user: false })
+        return plain(await runtime.run(args && typeof args === 'object' ? args : {}, { user: false }))
       },
     }), 'computer-use: tool')
   })

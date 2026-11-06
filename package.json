@@ -1,6 +1,6 @@
 {
   "name": "@local/computer-use",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "license": "MIT",
   "description": "Left-sidebar computer use through a private standard-mode CUA driver. The agent observes windows and operates them until you switch it off.",

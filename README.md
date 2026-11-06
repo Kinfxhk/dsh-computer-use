@@ -50,6 +50,14 @@ irm https://cua.ai/driver/install.ps1 | iex
 - 只操作你指定嘅一個視窗；冇全桌面輸入、冇剪貼簿、冇 process kill。
 - 呢個 plugin 唔會讀你嘅密碼欄位，亦唔應該用嚟做付款或者權限對話框操作。
 
+## 修改紀錄
+
+- **1.0.1** — 修好三個實際 bug：
+  - `computer_use` 嘅結果含 `undefined`，DSH 當成「value is not lossless JSON」而整個工具報錯（連 `status` 都死）。所有 tool 輸出而家會剷走 `undefined`。
+  - driver 自己結束咗 named session（idle timeout／driver 重啟）之後，所有 call 都會回 `session 'dsh-computer-use' has ended`，plugin 以前唔會救。而家偵測到就自動 `start_session` 復活再重試一次，並喺頁面 log 記一條 `recover`。
+  - 側欄頁以前用「係唔係自己 spawn 咗 driver」做判斷，attach 去已經運行嘅 daemon 時會顯示「Driver 未啟動」。而家 `status` 會實際 probe，`daemon` 代表 driver 有回應。
+- **1.0.0** — 首個版本。
+
 ## 同系列 DSH 插件
 
 | 插件 / Plugin | 功能 / What it does | 要唔要裝埋 / Also install | Repo |
